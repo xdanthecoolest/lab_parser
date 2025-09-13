@@ -5,8 +5,9 @@ import sys
 from tkinter import filedialog, messagebox, ttk
 from assembly_WIN64 import lab_assembler
 from full_parsing_WIN64 import LabParser
-from tests_WIN64 import run_tests
-from errors_handler_WIN64 import find_suspicious_blocks, log_errors, remove_suspicious_blocks
+from tests_WIN64 import run_validators
+from errors_handler_WIN64 import find_suspicious_blocks, log_errors, remove_suspicious_blocks, \
+    export_rows_without_lab_results
 
 # Для хранения parser между шагами
 parser = None
@@ -49,12 +50,7 @@ def on_process_click():
     )
 
     parser.full_parse_and_format()
-
-    if os.path.exists(raw_combined_file):
-        os.remove(raw_combined_file)
-
     messagebox.showinfo("Готово!", f"Файл успешно создан:\n{output_file}")
-
     test_btn.config(state='normal')
     error_btn.config(state='disabled')
     remove_btn.config(state='disabled')
@@ -62,27 +58,147 @@ def on_process_click():
 
 def on_test_click():
     global parser
-    errors = run_tests(parser.df)
-    if not errors:
+    errors, empty_rows = run_validators(parser.df)
+    raw_combined_file = os.path.join(get_basedir(), "combined.xlsx")
+
+    # пустых нет, ошибок нет
+    if not errors and not empty_rows:
         messagebox.showinfo("Внимание!", "Ошибок не найдено.")
         error_btn.config(state='disabled')
         remove_btn.config(state='disabled')
+        if os.path.exists(raw_combined_file):
+            os.remove(raw_combined_file)
+
+    # есть пустые, есть ошибки
+    if errors and empty_rows:
+        messagebox.showinfo("Внимание!",
+          f"Несовпадающих строк: {len(errors)} из {len(parser.df)}."
+          f"\nПустых ЛИ (в исходнике): {len(empty_rows)}""\nДля подробного разбора нажмите \"Проверить ошибки\".")
+        error_btn.config(state='normal')
+
+    # есть ошибки, пустых нет
+    if errors and not empty_rows:
+        messagebox.showinfo("Внимание!",
+                            f"Несовпадающих строк: {len(errors)} из {len(parser.df)}."
+                            f"\nДля подробного разбора нажмите \"Проверить ошибки\".")
+        error_btn.config(state='normal')
+        if os.path.exists(raw_combined_file):
+            os.remove(raw_combined_file)
+
+    # есть пустые, ошибок нет
     else:
         messagebox.showinfo("Внимание!",
-              f"Несовпадающих строк: {len(errors)}.\nДля подробного разбора нажмите \"Проверить ошибки\".")
+                             f"Пустых ЛИ (в исходнике): {len(empty_rows)}."
+                             f"\nДля подробного разбора нажмите \"Проверить ошибки\".")
         error_btn.config(state='normal')
 
 def on_error_handler_click():
     global parser
-    df_exploded = parser.df_exploded
-    errors_df = find_suspicious_blocks(df_exploded)
-    log_errors(errors_df)
+    raw_combined_file = os.path.join(get_basedir(), "combined.xlsx")
+    # директория для вывода файлов (рядом с выбранным итоговым Excel)
+    out_path = output_file_var.get()
+    out_dir = os.path.dirname(out_path) if out_path else get_basedir()
+    # имена файлов с таймстампом
+    now_str = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+    err_log_path = os.path.join(out_dir, f"{now_str}_Ошибки.txt")
+    no_li_file   = os.path.join(out_dir, f"{now_str}_ЭВСД_без_ЛИ.xlsx")
+
+    # 1) Прогон тестов: получаем ДВА результата — реальное расхождение и пустые ЛИ
+    errors, empty_rows = run_validators(parser.df)  # run_validators уже ок
+
+    # 2) Подозрительные блоки (хвост ', отрицательный)')
+    errors_df = find_suspicious_blocks(parser.df_exploded)
+
+    # 3) ЭВСД без ЛИ — попытаться сформировать из combined.xlsx (если есть)
+    combined_path = os.path.join(get_basedir(), "combined.xlsx")
+    had_empty_li = len(empty_rows) > 0  # факт наличия пустых ЛИ по тестам
+    created_no_li = False
+    export_error = None
+    if had_empty_li:
+        try:
+            created_no_li = export_rows_without_lab_results(combined_path, no_li_file)
+        except Exception as e:
+            export_error = e  # сохраним причину, но сообщение всё равно покажем
+
+    # 4) Лог по подозрительным блокам (если есть)
+    created_err_log = False
     if not errors_df.empty:
-        messagebox.showinfo("Готово!", f"Сохранён лог ошибок (Ошибки.txt). \nМожно удалить {len(errors_df)} битых строк.")
+        try:
+            log_errors(errors_df, path=err_log_path)
+            created_err_log = True
+        except Exception as e:
+            # не критично — просто напечатаем в консоль
+            print("Не удалось записать Ошибки.txt:", e)
+
+    # 5) Итоги
+    if created_err_log and had_empty_li:
+        # оба кейса одновременно
+        msg = (
+            "Обнаружены ОДНОВРЕМЕННО два типа проблем:\n"
+            f"• Подозрительные блоки — лог:\n{err_log_path}\n"
+            "• ЭВСД без ЛИ — "
+        )
+        if created_no_li:
+            msg += f"файл:\n{no_li_file}\n"
+            if os.path.exists(raw_combined_file):
+                os.remove(raw_combined_file)
+        else:
+            msg += "обнаружены (по тестам), но не удалось сформировать файл из combined.xlsx.\n"
+            if export_error:
+                msg += f"\nПричина: {export_error}\n"
+
+        msg += (
+            "\nВы можете удалить подозрительные строки кнопкой «Удалить битые строки».\n"
+            "Строки без ЛИ проверьте вручную в ГИС Меркурий."
+        )
         remove_btn.config(state='normal')
-    else:
-        messagebox.showinfo("Внимание!","Подозрительных строк не найдено.")
+
+    elif created_err_log:
+        # только подозрительные блоки
+        msg = (
+            f"Найдены подозрительные блоки.\nЛог сохранён:\n{err_log_path}\n\n"
+            "Нажмите «Удалить битые строки», чтобы очистить выгрузку."
+        )
+        if os.path.exists(raw_combined_file):
+            os.remove(raw_combined_file)
+
+        remove_btn.config(state='normal')
+
+    elif had_empty_li:
+        # только пустые ЛИ
+        if created_no_li:
+            msg = (
+                "Дубли/битых блоков не найдено.\n"
+                f"Но есть ЭВСД без ЛИ — сформирован файл:\n{no_li_file}\n\n"
+                "Проверьте эти строки вручную в ГИС Меркурий."
+            )
+            if os.path.exists(raw_combined_file):
+                os.remove(raw_combined_file)
+
+        else:
+            # файл не сформировался, но пустые строки есть (по run_validators)
+            msg = (
+                "Есть ЭВСД без ЛИ (выявлено тестами), но не удалось сформировать файл из combined.xlsx.\n"
+                "Проверьте исходники/права доступа и попробуйте снова."
+            )
         remove_btn.config(state='disabled')
+
+    else:
+        # вообще чисто: ни подозрительных, ни пустых ЛИ
+        if len(errors) == 0:
+            msg = "Проверка завершена: всё ок! Несовпадений и пустых ЛИ не обнаружено."
+            if os.path.exists(raw_combined_file):
+                os.remove(raw_combined_file)
+        else:
+            # теоретически: есть расхождения, но не попали под маску 'подозрительных'
+            msg = (
+                f"Есть {len(errors)} несовпадающих строк (см. консоль тестов),\n"
+                "но явных «битых блоков» и пустых ЛИ не найдено.\n"
+                "Проверьте различия вручную."
+            )
+        remove_btn.config(state='disabled')
+
+    messagebox.showinfo("Проверка завершена", msg)
 
 def on_remove_click():
     global parser
@@ -101,7 +217,7 @@ def on_remove_click():
     df_exploded_clean = remove_suspicious_blocks(df_exploded, errors_df)
     df_exploded_clean.to_excel(out_path, index=False)
     LabParser.reorder_and_save_df(df_exploded_clean, out_path)
-    LabParser.apply_formatting_to_file(out_path, reference_file="Формат_выгрузки.xlsx")
+    LabParser.apply_formatting_to_file(out_path, reference_file="resources/Формат_выгрузки.xlsx")
     messagebox.showinfo("Готово!", f"Файл успешно создан:\n{out_path}")
 
 def show_about():

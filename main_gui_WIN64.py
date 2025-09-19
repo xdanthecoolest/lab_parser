@@ -86,7 +86,7 @@ def on_test_click():
             os.remove(raw_combined_file)
 
     # есть пустые, ошибок нет
-    else:
+    if empty_rows and not errors:
         messagebox.showinfo("Внимание!",
                              f"Пустых ЛИ (в исходнике): {len(empty_rows)}."
                              f"\nДля подробного разбора нажмите \"Проверить ошибки\".")
@@ -117,6 +117,8 @@ def on_error_handler_click():
     if had_empty_li:
         try:
             created_no_li = export_rows_without_lab_results(combined_path, no_li_file)
+            LabParser.apply_formatting_to_file(
+                no_li_file, reference_file=os.path.join(get_basedir(), "Формат_выгрузки.xlsx"))
         except Exception as e:
             export_error = e  # сохраним причину, но сообщение всё равно покажем
 
@@ -217,7 +219,7 @@ def on_remove_click():
     df_exploded_clean = remove_suspicious_blocks(df_exploded, errors_df)
     df_exploded_clean.to_excel(out_path, index=False)
     LabParser.reorder_and_save_df(df_exploded_clean, out_path)
-    LabParser.apply_formatting_to_file(out_path, reference_file="resources/Формат_выгрузки.xlsx")
+    LabParser.apply_formatting_to_file(out_path, reference_file = os.path.join(get_basedir(), "Формат_выгрузки.xlsx"))
     messagebox.showinfo("Готово!", f"Файл успешно создан:\n{out_path}")
 
 def show_about():

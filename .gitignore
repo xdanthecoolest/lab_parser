@@ -5,6 +5,7 @@ __pycache__/
 .venv/
 env/
 .git.bak/
+hs_mapping.json
 
 # Build / PyInstaller
 build/

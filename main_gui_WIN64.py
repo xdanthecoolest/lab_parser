@@ -1,174 +1,276 @@
-import datetime
+from pathlib import Path
 import tkinter as tk
-import os
-import sys
-from tkinter import filedialog, messagebox, ttk
+from tkinter import messagebox
+import threading, time, os, sys, datetime
+
+from gui import App
+from hs_choose import load_hs_mapping
+
+from parse_attempt import (
+    build_driver_with_downloads, download_dir,
+    login_via_qr, choose_radio_and_submit, navigate_to_vetdocs_and_outgoing,
+    load_ttn_list_from_file, process_ttn_list, save_no_ttn_to_excel
+)
 from assembly_WIN64 import lab_assembler
 from full_parsing_WIN64 import LabParser
-from tests_WIN64 import run_tests
-from errors_handler_WIN64 import find_suspicious_blocks, log_errors, remove_suspicious_blocks
+from tests_WIN64 import run_validators
+from errors_handler_WIN64 import (
+    find_suspicious_blocks, log_errors, remove_suspicious_blocks, export_rows_without_lab_results
+)
 
-# Для хранения parser между шагами
+# ---- глобальное состояние ----
 parser = None
+HS_MAP = load_hs_mapping()  # {'Имя': {'uuid': '...', 'schema': '...'}, ...}
+app: App | None = None
 
-def select_input_dir():
-    path = filedialog.askdirectory(title="Выбрать папку с исходниками")
-    if path:
-        input_dir_var.set(path)
-
-def select_output_file():
-    path = filedialog.asksaveasfilename(defaultextension=".xlsx",
-                                        initialfile=f"{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}_Выгрузка_ЛИ.xlsx",
-                                        filetypes=[("Excel files", "*.xlsx")],
-                                        title="Сохранить итоговый файл как...")
-    if path:
-        output_file_var.set(path)
-
+# ---- утилиты ----
 def get_basedir():
     if getattr(sys, 'frozen', False):
         return os.path.dirname(os.path.abspath(sys.executable))
-    else:
-        return os.path.dirname(os.path.abspath(__file__))
+    return os.path.dirname(os.path.abspath(__file__))
 
-def on_process_click():
-    input_dir = input_dir_var.get()
-    output_file = output_file_var.get()
-    reference_file = os.path.join(get_basedir(), "Формат_выгрузки.xlsx")
-    raw_combined_file = os.path.join(get_basedir(), "combined.xlsx")
-
-    if not input_dir or not output_file:
-        messagebox.showerror("Ошибка", "Выберите папку исходников и итоговый файл!")
-        return
-
-    lab_assembler(input_dir, raw_combined_file)
-    global parser
-    parser = LabParser(
-        input_file=raw_combined_file,
-        reference_file=reference_file,
-        output_file=output_file
-    )
-
-    parser.full_parse_and_format()
-
-    if os.path.exists(raw_combined_file):
-        os.remove(raw_combined_file)
-
-    messagebox.showinfo("Готово!", f"Файл успешно создан:\n{output_file}")
-
-    test_btn.config(state='normal')
-    error_btn.config(state='disabled')
-    remove_btn.config(state='disabled')
-
-
-def on_test_click():
-    global parser
-    errors = run_tests(parser.df)
-    if not errors:
-        messagebox.showinfo("Внимание!", "Ошибок не найдено.")
-        error_btn.config(state='disabled')
-        remove_btn.config(state='disabled')
-    else:
-        messagebox.showinfo("Внимание!",
-              f"Несовпадающих строк: {len(errors)}.\nДля подробного разбора нажмите \"Проверить ошибки\".")
-        error_btn.config(state='normal')
-
-def on_error_handler_click():
-    global parser
-    df_exploded = parser.df_exploded
-    errors_df = find_suspicious_blocks(df_exploded)
-    log_errors(errors_df)
-    if not errors_df.empty:
-        messagebox.showinfo("Готово!", f"Сохранён лог ошибок (Ошибки.txt). \nМожно удалить {len(errors_df)} битых строк.")
-        remove_btn.config(state='normal')
-    else:
-        messagebox.showinfo("Внимание!","Подозрительных строк не найдено.")
-        remove_btn.config(state='disabled')
-
-def on_remove_click():
-    global parser
-    df_exploded = parser.df_exploded
-    errors_df = find_suspicious_blocks(df_exploded)
-    # Диалог выбора файла для сохранения
-    out_path = filedialog.asksaveasfilename(
-        defaultextension=".xlsx",
-        initialfile=f"{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}_Финальная_выгрузка_ЛИ.xlsx",
-        filetypes=[("Excel files", "*.xlsx")],
-        title="Сохранить файл без битых строк как..."
-    )
-    if not out_path:
-        return  # пользователь отменил
-
-    df_exploded_clean = remove_suspicious_blocks(df_exploded, errors_df)
-    df_exploded_clean.to_excel(out_path, index=False)
-    LabParser.reorder_and_save_df(df_exploded_clean, out_path)
-    LabParser.apply_formatting_to_file(out_path, reference_file="Формат_выгрузки.xlsx")
-    messagebox.showinfo("Готово!", f"Файл успешно создан:\n{out_path}")
+# ---- колбэки для GUI ----
+def get_hs_names():
+    return list(HS_MAP.keys())
 
 def show_about():
     messagebox.showinfo(
         "О программе",
-        "Парсер лабораторных исследований (v1.0)\n"
+        "Парсер лабораторных исследований (v2.0)\n"
         "Автоматизация для ГИС Меркурий.\n"
         "Кратко: собирает, форматирует, проверяет и сохраняет выгрузки ЛИ в один Excel.\n\n"
         "Подробнее — читайте README в папке с программой.\n\n"
         "© 2025 D.Agurin"
     )
 
+def on_parse(ttn_path: str, hs_name: str):
+    global app
+    if not ttn_path or not Path(ttn_path).is_file():
+        app.warn("Файл с ТТН", "Выберите корректный файл с номерами ТТН.")
+        return
 
-# ---- GUI ----
+    info = HS_MAP.get(hs_name, {})
+    hs_id = (info.get("uuid") or "").strip()
+    schema_value = (info.get("schema") or "").strip()
+    if not hs_id:
+        app.error("ХС", f"Для «{hs_name}» не указан UUID в hs_mapping.json.")
+        return
+    if not schema_value:
+        app.error("Схема", f"Для «{hs_name}» не указана schema в hs_mapping.json.")
+        return
 
-root = tk.Tk()
-root.title("Сборка и форматирование лабораторных исследований")
+    def worker():
+        try:
+            driver = build_driver_with_downloads(download_dir, headless=False)
+            # 1) вход
+            login_via_qr(driver)
+            # 2) ХС
+            choose_radio_and_submit(driver, hs_id)
+            print("✅ ХС выбран.")
+            time.sleep(1)
+            # 3) предприятие = 'null'
+            choose_radio_and_submit(driver, "null")
+            print("✅ Предприятие (id='null') выбрано.")
+            time.sleep(1)
+            # 4) в исходящие
+            navigate_to_vetdocs_and_outgoing(driver)
+            time.sleep(2)
+            # 5) список ТТН и прогон
+            ttns = load_ttn_list_from_file(Path(ttn_path))
+            print(f"🔎 В файле {Path(ttn_path).name}: {len(ttns)} ТТН")
+            no_ttn = process_ttn_list(
+                driver, ttns, schema_value=schema_value, pause_between=(0.8, 1.5)
+            )
+            save_no_ttn_to_excel(no_ttn)
 
-# прикручиваем иконки
-if getattr(sys, 'frozen', False):
-    # Путь к иконке — рядом с .exe
-    icon_path = os.path.join(os.path.dirname(sys.executable), 'logo.ico')
-else:
-    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logo.ico')
+            app.post(app.reveal_step2)
+            app.post(lambda: app.set_buttons(process=True))
+        except Exception as e:
+            app.post(lambda: app.error("Ошибка загрузки", str(e)))
+        finally:
+            app.post(lambda: app.set_busy(False))
 
-root.iconbitmap(icon_path)
+    app.set_busy(True)
+    threading.Thread(target=worker, daemon=True).start()
 
-input_dir_var = tk.StringVar()
-output_file_var = tk.StringVar()
+def on_process(input_dir: str, output_file: str):
+    global parser, app
+    if not input_dir or not output_file:
+        app.error("Ошибка", "Выберите папку исходников и итоговый файл!")
+        return
 
-about_btn = tk.Button(root, text="❓", command=show_about, relief='flat')
-about_btn.grid(row=5, column=0, sticky='sw', pady=(8, 6), padx=(8, 0))
+    def worker():
+        try:
+            reference_file = os.path.join(get_basedir(), "Формат_выгрузки.xlsx")
+            raw_combined_file = os.path.join(get_basedir(), "combined.xlsx")
 
-tk.Label(root, text="Powered by D.Agurin", fg="gray").grid(
-    row=5, column=2, sticky='se', pady=(8, 6), padx=(0, 8)
-)
+            lab_assembler(input_dir, raw_combined_file)
+            parser = LabParser(
+                input_file=raw_combined_file,
+                reference_file=reference_file,
+                output_file=output_file
+            )
+            parser.full_parse_and_format()
+            app.post(lambda: app.info("Готово!", f"Файл успешно создан:\n{output_file}"))
+            app.post(lambda: app.set_buttons(process=True, test=True, error=False, remove=False))
+        except Exception as e:
+            app.post(lambda: app.error("Ошибка обработки", str(e)))
 
-tk.Label(root, text="Папка с исходниками:").grid(row=0, column=0, sticky='e')
-tk.Entry(root, textvariable=input_dir_var, width=50).grid(row=0, column=1)
-tk.Button(root, text="Обзор...", command=select_input_dir).grid(row=0, column=2)
+    threading.Thread(target=worker, daemon=True).start()
 
-tk.Label(root, text="Итоговый Excel-файл:").grid(row=1, column=0, sticky='e')
-tk.Entry(root, textvariable=output_file_var, width=50).grid(row=1, column=1)
-tk.Button(root, text="Обзор...", command=select_output_file).grid(row=1, column=2)
+def on_test():
+    global parser, app
+    errors, empty_rows = run_validators(parser.df)
+    raw_combined_file = os.path.join(get_basedir(), "combined.xlsx")
 
-process_btn = tk.Button(root, text="Обработать", command=on_process_click)
-process_btn.grid(row=2, column=1, pady=8)
+    if not errors and not empty_rows:
+        app.info("Внимание!", "Ошибок не найдено.")
+        app.set_buttons(process=True, test=True, error=False, remove=False)
+        if os.path.exists(raw_combined_file):
+            os.remove(raw_combined_file)
 
-test_btn = tk.Button(root, text="Запустить тесты", command=on_test_click, state='disabled')
-test_btn.grid(row=3, column=1, pady=8)
+    if errors and empty_rows:
+        app.info("Внимание!",
+                 f"Несовпадающих строк: {len(errors)} из {len(parser.df)}."
+                 f"\nПустых ЛИ (в исходнике): {len(empty_rows)}"
+                 "\nДля подробного разбора нажмите \"Проверить ошибки\".")
+        app.set_buttons(process=True, test=True, error=True, remove=False)
 
-error_btn = tk.Button(root, text="Проверить ошибки", command=on_error_handler_click, state='disabled')
-error_btn.grid(row=4, column=1, pady=8)
+    if errors and not empty_rows:
+        app.info("Внимание!",
+                 f"Несовпадающих строк: {len(errors)} из {len(parser.df)}."
+                 "\nДля подробного разбора нажмите \"Проверить ошибки\".")
+        app.set_buttons(process=True, test=True, error=True, remove=False)
+        if os.path.exists(raw_combined_file):
+            os.remove(raw_combined_file)
 
-remove_btn = tk.Button(root, text="Удалить битые строки", command=on_remove_click, state='disabled')
-remove_btn.grid(row=5, column=1, pady=8)
+    if empty_rows and not errors:
+        app.info("Внимание!",
+                 f"Пустых ЛИ (в исходнике): {len(empty_rows)}."
+                 "\nДля подробного разбора нажмите \"Проверить ошибки\".")
+        app.set_buttons(process=True, test=True, error=True, remove=False)
 
-# центрируем
-def center_window(win, width=600, height=400):
-    win.update_idletasks()
-    x = (win.winfo_screenwidth()  - width) // 2
-    y = (win.winfo_screenheight() - height) // 2
-    win.geometry(f"{width}x{height}+{x}+{y}")
+def on_errors():
+    global parser, app
+    raw_combined_file = os.path.join(get_basedir(), "combined.xlsx")
+    out_path = app.get_values()["output_file"]
+    out_dir = os.path.dirname(out_path) if out_path else get_basedir()
+    now_str = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+    err_log_path = os.path.join(out_dir, f"{now_str}_Ошибки.txt")
+    no_li_file   = os.path.join(out_dir, f"{now_str}_ЭВСД_без_ЛИ.xlsx")
 
-center_window(root, width=565, height=220)
-root.resizable(False, False)
+    errors, empty_rows = run_validators(parser.df)
+    errors_df = find_suspicious_blocks(parser.df_exploded)
 
-root.grid_columnconfigure(0, minsize=140)
+    combined_path = os.path.join(get_basedir(), "combined.xlsx")
+    had_empty_li = len(empty_rows) > 0
+    created_no_li = False
+    export_error = None
+    if had_empty_li:
+        try:
+            created_no_li = export_rows_without_lab_results(combined_path, no_li_file)
+            LabParser.apply_formatting_to_file(
+                no_li_file, reference_file=os.path.join(get_basedir(), "Формат_выгрузки.xlsx"))
+        except Exception as e:
+            export_error = e
 
-root.mainloop()
+    created_err_log = False
+    if not errors_df.empty:
+        try:
+            log_errors(errors_df, path=err_log_path)
+            created_err_log = True
+        except Exception as e:
+            print("Не удалось записать Ошибки.txt:", e)
+
+    if created_err_log and had_empty_li:
+        msg = (
+            "Обнаружены ОДНОВРЕМЕННО два типа проблем:\n"
+            f"• Подозрительные блоки — лог:\n{err_log_path}\n"
+            "• ЭВСД без ЛИ — "
+        )
+        if created_no_li:
+            msg += f"файл:\n{no_li_file}\n"
+            if os.path.exists(raw_combined_file):
+                os.remove(raw_combined_file)
+        else:
+            msg += "обнаружены (по тестам), но не удалось сформировать файл из combined.xlsx.\n"
+            if export_error:
+                msg += f"\nПричина: {export_error}\n"
+        msg += (
+            "\nВы можете удалить подозрительные строки кнопкой «Удалить битые строки».\n"
+            "Строки без ЛИ проверьте вручную в ГИС Меркурий."
+        )
+        app.set_buttons(process=True, test=True, error=True, remove=True)
+        app.info("Проверка завершена", msg)
+
+    elif created_err_log:
+        msg = (
+            f"Найдены подозрительные блоки.\nЛог сохранён:\n{err_log_path}\n\n"
+            "Нажмите «Удалить битые строки», чтобы очистить выгрузку."
+        )
+        if os.path.exists(raw_combined_file):
+            os.remove(raw_combined_file)
+        app.set_buttons(process=True, test=True, error=True, remove=True)
+        app.info("Проверка завершена", msg)
+
+    elif had_empty_li:
+        if created_no_li:
+            msg = (
+                "Дубли/битых блоков не найдено.\n"
+                f"Но есть ЭВСД без ЛИ — сформирован файл:\n{no_li_file}\n\n"
+                "Проверьте эти строки вручную в ГИС Меркурий."
+            )
+            if os.path.exists(raw_combined_file):
+                os.remove(raw_combined_file)
+        else:
+            msg = (
+                "Есть ЭВСД без ЛИ (выявлено тестами), но не удалось сформировать файл из combined.xlsx.\n"
+                "Проверьте исходники/права доступа и попробуйте снова."
+            )
+        app.set_buttons(process=True, test=True, error=True, remove=False)
+        app.info("Проверка завершена", msg)
+
+    else:
+        if len(errors) == 0:
+            msg = "Проверка завершена: всё ок! Несовпадений и пустых ЛИ не обнаружено."
+            if os.path.exists(raw_combined_file):
+                os.remove(raw_combined_file)
+        else:
+            msg = (
+                f"Есть {len(errors)} несовпадающих строк (см. консоль тестов),\n"
+                "но явных «битых блоков» и пустых ЛИ не найдено.\n"
+                "Проверьте различия вручную."
+            )
+        app.set_buttons(process=True, test=True, error=False, remove=False)
+        app.info("Проверка завершена", msg)
+
+def on_remove():
+    global parser, app
+    df_exploded = parser.df_exploded
+    errors_df = find_suspicious_blocks(df_exploded)
+    out_path = tk.filedialog.asksaveasfilename(
+        defaultextension=".xlsx",
+        initialfile=f"{datetime.datetime.now():%Y-%m-%d_%H-%M-%S}_Финальная_выгрузка_ЛИ.xlsx",
+        filetypes=[("Excel files", "*.xlsx")],
+        title="Сохранить файл без битых строк как..."
+    )
+    if not out_path:
+        return
+    df_exploded_clean = remove_suspicious_blocks(df_exploded, errors_df)
+    df_exploded_clean.to_excel(out_path, index=False)
+    LabParser.reorder_and_save_df(df_exploded_clean, out_path)
+    LabParser.apply_formatting_to_file(out_path, reference_file=os.path.join(get_basedir(), "Формат_выгрузки.xlsx"))
+    app.info("Готово!", f"Файл успешно создан:\n{out_path}")
+
+# ---- запуск ----
+if __name__ == "__main__":
+    app = App(
+        on_parse=on_parse,
+        on_process=on_process,
+        on_test=on_test,
+        on_errors=on_errors,
+        on_remove=on_remove,
+        get_hs_names=get_hs_names,
+        show_about=show_about
+    )
+    app.run()

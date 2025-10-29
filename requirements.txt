@@ -2,3 +2,4 @@ openpyxl==3.1.5
 pandas==2.2.3
 pyinstaller==6.14.1
 XlsxWriter==3.2.2
+selenium==4.35.0

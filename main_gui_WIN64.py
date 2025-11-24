@@ -100,6 +100,7 @@ def on_process(input_dir: str, output_file: str):
         return
 
     def worker():
+        global parser
         try:
             reference_file = os.path.join(get_basedir(), "Формат_выгрузки.xlsx")
             raw_combined_file = os.path.join(get_basedir(), "combined.xlsx")

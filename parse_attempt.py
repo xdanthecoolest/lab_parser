@@ -27,6 +27,8 @@ QR_WAIT_SEC = 60
 HUMAN_MIN = 0.6
 HUMAN_MAX = 1.8
 
+DEFAULT_SINCE_DATE = "01.08.2025"  # если пользователь в GUI дату не указал
+
 # хелпер для ИНДЕПОТЕНТНОСТИ №1
 def is_checked(el) -> bool:
     try:
@@ -444,7 +446,7 @@ def choose_date_since(driver, since_date: str):
     el.send_keys(since_date)   # формат dd.MM.yyyy
 
 # поиск
-def open_search_panel(driver):
+def open_search_panel(driver, since_date):
     """Клик по 'Поиск' (id=findFormTop) и ожидание модалки."""
     btn = WebDriverWait(driver, 20).until(
         EC.element_to_be_clickable((By.ID, "findFormTop"))
@@ -461,7 +463,7 @@ def open_search_panel(driver):
     # отмечаем «исключить аннулированные» (один раз, идемпотентно)
     _ensure_revoked_unchecked(driver)
     # выбираем дату, с которой будем осуществлять поиск
-    choose_date_since(driver, "01.05.2025")
+    choose_date_since(driver, since_date or DEFAULT_SINCE_DATE)
 
 # сокрытие ненужной формы при поиске
 def collapse_general_info(driver):
@@ -488,12 +490,12 @@ def collapse_general_info(driver):
         pass
 
 # поиск по конкретной ттн
-def search_one_ttn(driver, ttn_number: str):
+def search_one_ttn(driver, ttn_number: str, since_date: str | None = None):
     """
     Поиск одного номера ТТН:
       Поиск → свернуть 'Общая информация' → ввести ТТН → Найти.
     """
-    open_search_panel(driver)
+    open_search_panel(driver, since_date)
     collapse_general_info(driver)
 
     # поле ввода ТТН (если секция транспорта ещё свёрнута, всё равно найдём — поле появится)
@@ -707,8 +709,12 @@ def print_xlsx_table(driver, schema_value: str = "130174", schema_text: str | No
     print("✅ Отправили на формирование XLSX по выбранной схеме.")
 
 # цикл для множественной выгрузки
-def process_ttn_list(driver, ttn_list: list[str], schema_value: str = "130174",
-                     pause_between: tuple[float, float] = (1.2, 2.5)):
+def process_ttn_list(driver,
+                     ttn_list: list[str],
+                     schema_value: str = "130174",
+                     pause_between: tuple[float, float] = (1.2, 2.5),
+                     since_date: str | None = None
+                     ):
     """
     Для каждого ТТН:
       - открыть Поиск (или переиспользовать открытый)

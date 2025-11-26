@@ -43,11 +43,27 @@ def show_about():
         "© 2025 D.Agurin"
     )
 
-def on_parse(ttn_path: str, hs_name: str):
+def on_parse(ttn_path: str, hs_name: str, since_date: str):
     global app
     if not ttn_path or not Path(ttn_path).is_file():
         app.warn("Файл с ТТН", "Выберите корректный файл с номерами ТТН.")
         return
+
+        # валидация даты (если поле не пустое)
+        since_date = since_date.strip()
+        if since_date:
+            try:
+                # проверяем формат dd.MM.yyyy
+                datetime.datetime.strptime(since_date, "%d.%m.%Y")
+            except ValueError:
+                app.warn(
+                    "Некорректная дата",
+                    "Дата должна быть в формате dd.MM.yyyy, пример: 01.08.2025."
+                )
+                return
+        else:
+            # если пусто — пусть downstream использует DEFAULT_SINCE_DATE
+            since_date = None
 
     info = HS_MAP.get(hs_name, {})
     hs_id = (info.get("uuid") or "").strip()
@@ -77,21 +93,45 @@ def on_parse(ttn_path: str, hs_name: str):
             time.sleep(2)
             # 5) список ТТН и прогон
             ttns = load_ttn_list_from_file(Path(ttn_path))
-            print(f"🔎 В файле {Path(ttn_path).name}: {len(ttns)} ТТН")
-            no_ttn = process_ttn_list(
-                driver, ttns, schema_value=schema_value, pause_between=(0.8, 1.5)
-            )
-            save_no_ttn_to_excel(no_ttn)
+            total = len(ttns)
+            print(f"🔎 В файле {Path(ttn_path).name}: {total} ТТН")
 
+            no_ttn = process_ttn_list(
+                driver, ttns, schema_value=schema_value, pause_between=(0.8, 1.5), since_date=since_date
+            )
+
+            # сохраняем ненайденные ТТН (файл создаётся только если список не пустой)
+            out_path = save_no_ttn_to_excel(no_ttn)
+            missed = len(no_ttn)
+            driver.quit()
+
+            # готовим сообщение для пользователя
+            if missed == 0:
+                msg = (
+                    "Этап «Загрузить ЭВСД» завершён.\n"
+                    f"Все {total} ТТН найдены в ГИС Меркурий."
+                )
+            else:
+                msg = (
+                    "Этап «Загрузить ЭВСД» завершён.\n"
+                    f"Не найдены {missed} ТТН из {total}.\n"
+                    f"Список сохранён в файле:\n{out_path}"
+                )
+
+            # показать step2 + включить кнопку «Обработать» + инфо-диалог
             app.post(app.reveal_step2)
             app.post(lambda: app.set_buttons(process=True))
+            app.post(lambda m=msg: app.info("Результат загрузки ЭВСД", m))
+
         except Exception as e:
-            app.post(lambda: app.error("Ошибка загрузки", str(e)))
+            msg = str(e)
+            app.post(lambda m=msg: app.error("Ошибка загрузки", m))
         finally:
             app.post(lambda: app.set_busy(False))
 
     app.set_busy(True)
     threading.Thread(target=worker, daemon=True).start()
+
 
 def on_process(input_dir: str, output_file: str):
     global parser, app

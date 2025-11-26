@@ -1,3 +1,4 @@
+import re
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import datetime
@@ -8,7 +9,7 @@ class App:
                  get_hs_names, show_about):
         """
         Колбэки:
-          on_parse(ttn_path:str, hs_name:str)
+          on_parse(ttn_path:str, hs_name:str, since_date:str)
           on_process(input_dir:str, output_file:str)
           on_test()
           on_errors()
@@ -51,12 +52,32 @@ class App:
     def error(self, title, msg): messagebox.showerror(title, msg)
     def warn (self, title, msg): messagebox.showwarning(title, msg)
 
+    def _validate_date_chars(self, proposed: str) -> bool:
+        # разрешаем пусто (на всякий) и длину до 10
+        if proposed == "":
+            return True
+        if len(proposed) > 10:
+            return False
+        # только цифры и точки
+        return re.fullmatch(r"[0-9.]*", proposed) is not None
+
+    def _validate_date_full(self, s: str) -> bool:
+        s = (s or "").strip()
+        if not s:
+            return False
+        try:
+            datetime.datetime.strptime(s, "%d.%m.%Y")
+            return True
+        except ValueError:
+            return False
+
     def get_values(self):
         return {
             "ttn_path": self.ttn_var.get().strip(),
             "hs_name":  self.hs_var.get().strip(),
             "input_dir": self.in_dir.get().strip(),
             "output_file": self.out_file.get().strip(),
+            "since_date": self.date_var.get().strip()
         }
 
     def run(self): self.root.mainloop()
@@ -67,6 +88,7 @@ class App:
         self.hs_var   = tk.StringVar()
         self.in_dir   = tk.StringVar()
         self.out_file = tk.StringVar()
+        self.date_var = tk.StringVar(value="01.08.2025")
 
         # STEP 1
         step1 = tk.Frame(self.root, padx=12, pady=8)
@@ -75,20 +97,34 @@ class App:
         step1.grid_columnconfigure(1, weight=1)
         step1.grid_columnconfigure(2, minsize=90)
 
+        # 0: файл ТТН
         tk.Label(step1, text="Файл с номерами ТТН:").grid(row=0, column=0, sticky="e", pady=2)
         tk.Entry(step1, textvariable=self.ttn_var, width=50).grid(row=0, column=1, sticky="ew", padx=6, pady=2)
         tk.Button(step1, text="Обзор…", command=self._browse_ttn).grid(row=0, column=2, pady=2)
 
-        tk.Label(step1, text="ХС:").grid(row=1, column=0, sticky="e", pady=(4,2))
+        # 1: ХС
+        tk.Label(step1, text="ХС:").grid(row=1, column=0, sticky="e", pady=(4, 2))
         self.hs_combo = ttk.Combobox(step1, textvariable=self.hs_var, state="readonly")
-        self.hs_combo.grid(row=1, column=1, columnspan=2, sticky="ew", padx=6, pady=(4,2))
+        self.hs_combo.grid(row=1, column=1, columnspan=2, sticky="ew", padx=6, pady=(4, 2))
         hs_names = self.get_hs_names() or []
         self.hs_combo["values"] = hs_names
-        if hs_names: self.hs_combo.current(0)
+        if hs_names:
+            self.hs_combo.current(0)
 
-        ttk.Separator(step1, orient="horizontal").grid(row=2, column=0, columnspan=3, sticky="ew", pady=(6,6))
+        # 2: Дата с
+        tk.Label(step1, text="Дата с (dd.MM.yyyy):").grid(row=2, column=0, sticky="e", pady=(4, 2))
+
+        vcmd = (self.root.register(self._validate_date_chars), "%P")
+        date_entry = tk.Entry(step1, textvariable=self.date_var, width=12,
+                              validate="key", validatecommand=vcmd)
+        date_entry.grid(row=2, column=1, sticky="w", padx=6, pady=(4, 2))
+
+        # разделитель
+        ttk.Separator(step1, orient="horizontal").grid(row=3, column=0, columnspan=3, sticky="ew", pady=(6, 6))
+
+        # кнопка
         self.parse_btn = tk.Button(step1, text="Загрузить ЭВСД", command=self._on_parse_click)
-        self.parse_btn.grid(row=3, column=0, columnspan=3, sticky="ew")
+        self.parse_btn.grid(row=4, column=0, columnspan=3, sticky="ew")
 
         # STEP 2 (скрыт до parse)
         self.step2 = tk.Frame(self.root, padx=12, pady=4)
@@ -146,7 +182,11 @@ class App:
 
     def _on_parse_click(self):
         v = self.get_values()
-        self.on_parse(v["ttn_path"], v["hs_name"])
+        # строгая валидация перед запуском
+        if not self._validate_date_full(v["since_date"]):
+            self.warn("Некорректная дата", "Введите дату в формате dd.MM.yyyy, пример: 01.08.2025")
+            return
+        self.on_parse(v["ttn_path"], v["hs_name"], v["since_date"])
 
     def _on_process_click(self):
         v = self.get_values()

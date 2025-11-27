@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import random
 from pathlib import Path
@@ -28,6 +29,12 @@ HUMAN_MIN = 0.6
 HUMAN_MAX = 1.8
 
 DEFAULT_SINCE_DATE = "01.08.2025"  # если пользователь в GUI дату не указал
+
+def get_basedir() -> Path:
+    # где лежит exe при PyInstaller, или папка со скриптом при обычном запуске
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
 
 # хелпер для ИНДЕПОТЕНТНОСТИ №1
 def is_checked(el) -> bool:
@@ -448,6 +455,7 @@ def choose_date_since(driver, since_date: str):
 # поиск
 def open_search_panel(driver, since_date):
     """Клик по 'Поиск' (id=findFormTop) и ожидание модалки."""
+    print("open_search_panel since_date =", since_date)
     btn = WebDriverWait(driver, 20).until(
         EC.element_to_be_clickable((By.ID, "findFormTop"))
     )
@@ -729,7 +737,7 @@ def process_ttn_list(driver,
         print(f"\n— [{idx}/{len(ttn_list)}] Обрабатываем ТТН: {ttn}")
         try:
             # Поиск
-            search_one_ttn(driver, ttn)
+            search_one_ttn(driver, ttn, since_date=since_date)
 
             if not has_search_results(driver):
                 print(f"⏭️  ТТН {ttn}: список пуст — переходим к следующей.")
@@ -738,7 +746,7 @@ def process_ttn_list(driver,
                 continue
 
             # Печать (с твоей схемой)
-            print_xlsx_table(driver, schema_value="130174", pages=(1, 5))
+            print_xlsx_table(driver, schema_value=schema_value, pages=(1, 5))
 
             # можно добавить ожидание завершения скачивания файла
             # wait_download_xlsx(download_dir)  # допишем позже (возможно)
@@ -753,18 +761,24 @@ def process_ttn_list(driver,
 
 # сохранение списка ненайденных ттн
 def save_no_ttn_to_excel(no_ttn_list: list[str], out_path: Path | None = None) -> Path:
-    if out_path is None:
-        ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        out_path = Path(__file__).with_name(f"not_found_ttns_{ts}.xlsx")
+    """
+    Сохраняет файл рядом с .exe (или рядом со скриптом при обычном запуске).
+    Файл создаётся только если список не пустой.
+    """
     if not no_ttn_list:
         print("✅ Пусто: все ТТН нашлись, файл не создаю.")
-        return out_path
+        return out_path or (get_basedir() / "Ненайденные_ТТН_EMPTY.xlsx")
+
+    if out_path is None:
+        ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        out_path = get_basedir() / f"Ненайденные_ТТН_{ts}.xlsx"
+
+    out_path = Path(out_path)
     pd.DataFrame({"TTN": no_ttn_list}).to_excel(out_path, index=False)
     print(f"💾 Сохранил ненайденные ТТН: {out_path}")
     return out_path
 
-# папочка для скачивания
-if os.name == "nt":
-    download_dir = Path(os.getenv("USERPROFILE")) / "Desktop" / "actual_lab_tests"
-else:
-    download_dir = Path(os.getenv("HOME")) / "Desktop" / "actual_lab_tests"
+def get_default_download_dir() -> Path:
+    if os.name == "nt":
+        return Path(os.getenv("USERPROFILE", "")) / "Desktop" / "actual_lab_tests"
+    return Path(os.getenv("HOME", "")) / "Desktop" / "actual_lab_tests"

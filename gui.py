@@ -2,6 +2,7 @@ import re
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import datetime
+from parse_attempt import get_default_download_dir
 
 class App:
     def __init__(self, *,
@@ -71,13 +72,19 @@ class App:
         except ValueError:
             return False
 
+    def _browse_download_dir(self):
+        path = filedialog.askdirectory(title="Выбрать папку для скачивания")
+        if path:
+            self.download_dir_var.set(path)
+
     def get_values(self):
         return {
             "ttn_path": self.ttn_var.get().strip(),
             "hs_name":  self.hs_var.get().strip(),
             "input_dir": self.in_dir.get().strip(),
             "output_file": self.out_file.get().strip(),
-            "since_date": self.date_var.get().strip()
+            "since_date": self.date_var.get().strip(),
+            "download_dir": self.download_dir_var.get().strip()
         }
 
     def run(self): self.root.mainloop()
@@ -89,6 +96,7 @@ class App:
         self.in_dir   = tk.StringVar()
         self.out_file = tk.StringVar()
         self.date_var = tk.StringVar(value="01.08.2025")
+        self.download_dir_var = tk.StringVar(value=str(get_default_download_dir()))
 
         # STEP 1
         step1 = tk.Frame(self.root, padx=12, pady=8)
@@ -119,12 +127,19 @@ class App:
                               validate="key", validatecommand=vcmd)
         date_entry.grid(row=2, column=1, sticky="w", padx=6, pady=(4, 2))
 
+        # 3: Выбор папки для скачивания
+        tk.Label(step1, text="Папка для скачивания:").grid(row=3, column=0, sticky="e", pady=(4, 2))
+        tk.Entry(step1, textvariable=self.download_dir_var, width=50).grid(
+            row=3, column=1, sticky="ew", padx=6, pady=(4, 2)
+        )
+        tk.Button(step1, text="Обзор…", command=self._browse_download_dir).grid(row=3, column=2, pady=(4, 2))
+
         # разделитель
-        ttk.Separator(step1, orient="horizontal").grid(row=3, column=0, columnspan=3, sticky="ew", pady=(6, 6))
+        ttk.Separator(step1, orient="horizontal").grid(row=4, column=0, columnspan=3, sticky="ew", pady=(6, 6))
 
         # кнопка
         self.parse_btn = tk.Button(step1, text="Загрузить ЭВСД", command=self._on_parse_click)
-        self.parse_btn.grid(row=4, column=0, columnspan=3, sticky="ew")
+        self.parse_btn.grid(row=5, column=0, columnspan=3, sticky="ew")
 
         # STEP 2 (скрыт до parse)
         self.step2 = tk.Frame(self.root, padx=12, pady=4)
@@ -186,7 +201,7 @@ class App:
         if not self._validate_date_full(v["since_date"]):
             self.warn("Некорректная дата", "Введите дату в формате dd.MM.yyyy, пример: 01.08.2025")
             return
-        self.on_parse(v["ttn_path"], v["hs_name"], v["since_date"])
+        self.on_parse(v["ttn_path"], v["hs_name"], v["since_date"], v["download_dir"])
 
     def _on_process_click(self):
         v = self.get_values()

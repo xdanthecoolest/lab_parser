@@ -7,9 +7,8 @@ from gui import App
 from hs_choose import load_hs_mapping
 
 from parse_attempt import (
-    build_driver_with_downloads, download_dir,
-    login_via_qr, choose_radio_and_submit, navigate_to_vetdocs_and_outgoing,
-    load_ttn_list_from_file, process_ttn_list, save_no_ttn_to_excel
+    build_driver_with_downloads, login_via_qr, choose_radio_and_submit,
+    navigate_to_vetdocs_and_outgoing, load_ttn_list_from_file, process_ttn_list, save_no_ttn_to_excel
 )
 from assembly_WIN64 import lab_assembler
 from full_parsing_WIN64 import LabParser
@@ -43,7 +42,7 @@ def show_about():
         "© 2025 D.Agurin"
     )
 
-def on_parse(ttn_path: str, hs_name: str, since_date: str):
+def on_parse(ttn_path: str, hs_name: str, since_date: str, download_dir: str):
     global app
     if not ttn_path or not Path(ttn_path).is_file():
         app.warn("Файл с ТТН", "Выберите корректный файл с номерами ТТН.")
@@ -75,9 +74,21 @@ def on_parse(ttn_path: str, hs_name: str, since_date: str):
         app.error("Схема", f"Для «{hs_name}» не указана schema в hs_mapping.json.")
         return
 
+    download_dir = (download_dir or "").strip()
+    if not download_dir:
+        app.warn("Папка загрузки", "Выберите папку для скачивания.")
+        return
+
+    dl_path = Path(download_dir)
+    try:
+        dl_path.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        app.error("Папка загрузки", f"Не удалось создать/использовать папку:\n{dl_path}\n\n{e}")
+        return
+
     def worker():
         try:
-            driver = build_driver_with_downloads(download_dir, headless=False)
+            driver = build_driver_with_downloads(dl_path, headless=False)
             # 1) вход
             login_via_qr(driver)
             # 2) ХС
